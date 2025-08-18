@@ -1,0 +1,24 @@
+:root{
+  --size: 36px;     /* override via ?size=42 */
+  --align: center;  /* left | center | right via ?align=left */
+  --bottom: 2vh;    /* ?bottom=4vh */
+}
+html,body{margin:0;padding:0;background:transparent;overflow:hidden}
+.wrap{position:fixed;left:0;right:0;bottom:var(--bottom);display:flex;justify-content:var(--align);}
+.pill{
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-size: var(--size);
+  line-height: 1.2; color: #fff;
+  padding: .4em .8em; border-radius: 999px;
+  background: rgba(0,0,0,.45);
+  backdrop-filter: blur(4px);
+  text-shadow: 0 2px 6px rgba(0,0,0,.6);
+  max-width: 90vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fade{opacity:0; transition: opacity .2s ease}
+.fade.show{opacity:1}
+
+/* marquee when class .marquee is added by JS */
+.pill.marquee > span{ display:inline-block; padding-left: 100%; /* start off to the right */
+  animation: scroll 12s linear infinite; }
+@keyframes scroll{ 0%{ transform: translateX(0); } 100%{ transform: translateX(-100%); } }
