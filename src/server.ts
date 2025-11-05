@@ -56,16 +56,6 @@ const MIME = {
   ".json": "application/json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
 };
-const env = {
-    ...process.env,
-    // Force Intel for decode + GL
-    LIBVA_DRIVER_NAME: "iHD",
-    __GLX_VENDOR_LIBRARY_NAME: "mesa",
-    DRI_PRIME: "0",               // harmless here; ensures Mesa picks iGPU
-    __NV_PRIME_RENDER_OFFLOAD: "",// make sure offload isn't set
-};
-
-
 
 async function sendFile(res, filePath) {
   try {
@@ -188,7 +178,7 @@ function startWallpaper() {
         ...(SHUFFLE ? ["--shuffle"] : []),
         "--no-osc", "--no-osd-bar",
         "--force-window",
-        "--hwdec=vaapi-copy",
+        "--hwdec=auto-copy",
 
         // yt-dlp hook (stays latest & plays nicer with YT)
         `--script-opts=ytdl_hook-ytdl_path=${YTDL}`,
@@ -208,7 +198,7 @@ function startWallpaper() {
     ];
     if (PLAYLIST) mpvArgs.push(`--playlist=${PLAYLIST}`); else mpvArgs.push(URL_IN);
     const xArgs = ["-b","-s","-fs","-st","-sp","-nf","-ov","-fdt","--", MPV, ...mpvArgs];
-    xwrapProc = spawn(XWINWRAP, xArgs, { stdio: "ignore", env });
+    xwrapProc = spawn(XWINWRAP, xArgs, { stdio: "ignore" });
     xwrapProc.on("exit", (code, sig) => { console.log("xwinwrap exited", code, sig); process.exit(0); });
 
     setTimeout(() => { connectMpvSock().catch(e => console.error(e)); }, 400);
