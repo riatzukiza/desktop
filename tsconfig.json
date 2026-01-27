@@ -16,5 +16,7 @@
         "module":"nodenext",
         "moduleResolution": "nodenext","allowArbitraryExtensions": true,"allowImportingTsExtensions": true
 
-    }
+    },
+    "include": ["src/**/*.ts", "src/**/*.tsx"],
+    "exclude": ["eslint.config.ts", "dist", "node_modules"]
 }

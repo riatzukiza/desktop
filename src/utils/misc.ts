@@ -44,14 +44,16 @@ export async function fpcalc(file: string): Promise<FpcalcJson> {
   };
 }
 
-export const parseArgs = (args=process.argv): Record<string, boolean | string> => {
+export const parseArgs = (
+  args: readonly string[] = process.argv,
+): Record<string, boolean | string> => {
   const entries = args
     .slice(2)
     .reduce<Array<[string, string | boolean]>>((acc, v, i, arr) => {
       if (v.startsWith('--')) {
         const k = v.slice(2);
-        const val =
-          arr[i + 1] && !arr[i + 1].startsWith('--') ? (arr[i + 1] as string) : true;
+        const next = arr[i + 1];
+        const val = typeof next === 'string' && !next.startsWith('--') ? next : true;
         acc.push([k, val]);
       }
       return acc;
