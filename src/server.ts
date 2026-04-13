@@ -7,6 +7,7 @@
 
 import http from "node:http";
 import { WebSocketServer } from "ws";
+import type { WebSocket } from "ws";
 import { spawn } from "node:child_process";
 import net from "node:net";
 import { promises as fs } from "node:fs";
@@ -14,41 +15,52 @@ import fscb from "node:fs";
 import path from "node:path";
 import url from "node:url";
 
+type ArgValue = string | boolean;
+
 const args = Object.fromEntries(
-  process.argv.slice(2).reduce((acc, a, i, arr) => {
+  process.argv.slice(2).reduce<Array<[string, string | boolean]>>((acc, a, i, arr) => {
     if (a.startsWith("--")) {
       const k = a.slice(2);
-      const v = arr[i + 1] && !arr[i + 1].startsWith("--") ? arr[i + 1] : true;
+      const next = arr[i + 1];
+      const v = typeof next === "string" && !next.startsWith("--") ? next : true;
       acc.push([k, v]);
     }
     return acc;
   }, [])
-);
+) as Record<string, ArgValue>;
 
-const PORT = Number(args.port || 3323);
-const VOLUME = Number(args.volume || 50);
+const portArg = typeof args.port === "string" ? args.port : undefined;
+const volumeArg = typeof args.volume === "string" ? args.volume : undefined;
+const PORT = Number(portArg ?? 3323);
+const VOLUME = Number(volumeArg ?? 50);
 const SHUFFLE = args.shuffle !== "false"; // default true
-const PLAYLIST = args.playlist || null;
-const URL_IN = args.url || null;
-const PUBLIC_DIR = path.resolve(args.public || "./public");
-const YTDL = args.ytdl || "/usr/local/bin/yt-dlp";
-const RUNTIME = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() || process.env.UID || ''}`;
-const SOCKET = args.socket || `${RUNTIME}/ytwall.sock`;
+const PLAYLIST = typeof args.playlist === "string" ? args.playlist : null;
+const URL_IN = typeof args.url === "string" ? args.url : null;
+const PUBLIC_DIR = path.resolve(typeof args.public === "string" ? args.public : "./public");
+const YTDL = typeof args.ytdl === "string" ? args.ytdl : "/usr/local/bin/yt-dlp";
+const runtimeId =
+  typeof process.getuid === "function" ? String(process.getuid()) : process.env.UID ?? '';
+const RUNTIME = process.env.XDG_RUNTIME_DIR ?? `/run/user/${runtimeId}`;
+const SOCKET = typeof args.socket === "string" ? args.socket : `${RUNTIME}/ytwall.sock`;
 
-const XWINWRAP = args.xwinwrap || "xwinwrap";
-const MPV = args.mpv || "mpv";
+const XWINWRAP = typeof args.xwinwrap === "string" ? args.xwinwrap : "xwinwrap";
+const MPV = typeof args.mpv === "string" ? args.mpv : "mpv";
 
 if (!PLAYLIST && !URL_IN) {
   console.error("Pass --playlist <file.m3u> or --url <YouTube URL/playlist>");
   process.exit(1);
 }
 
-let mpvSock = null;
-let xwrapProc = null;
-let current = { title: "", artist: "", meta: {} };
-const wsClients = new Set();
+let mpvSock: net.Socket | null = null;
+let xwrapProc: ReturnType<typeof spawn> | null = null;
+const current: { title: string; artist: string; meta: Record<string, string> } = {
+  title: "",
+  artist: "",
+  meta: {},
+};
+const wsClients = new Set<WebSocket>();
 
-const MIME = {
+const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -57,7 +69,10 @@ const MIME = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-async function sendFile(res, filePath) {
+async function sendFile(
+  res: http.ServerResponse<http.IncomingMessage>,
+  filePath: string,
+): Promise<void> {
   try {
     const stat = await fs.stat(filePath);
     if (stat.isDirectory()) return sendFile(res, path.join(filePath, "index.html"));
@@ -71,13 +86,14 @@ async function sendFile(res, filePath) {
   }
 }
 
-function broadcast(msg) {
+function broadcast(msg: unknown): void {
   const s = JSON.stringify(msg);
   for (const ws of wsClients) if (ws.readyState === 1) ws.send(s);
 }
 
-function mpvSend(cmd) {
-  if (!mpvSock) return; mpvSock.write(JSON.stringify({ command: cmd }) + "\n");
+function mpvSend(cmd: ReadonlyArray<string | number>): void {
+  if (!mpvSock) return;
+  mpvSock.write(JSON.stringify({ command: cmd }) + "\n");
 }
 
 function prettyTitle() {
@@ -89,46 +105,57 @@ function prettyTitle() {
   return mt || t || "…";
 }
 
-async function connectMpvSock(retries = 60) {
-    return await new Promise((resolve, reject) => {
-        const attempt = () => {
-            const s = net.createConnection(SOCKET, () => {
-                mpvSock = s; wireMpvIPC(s); resolve();
-            });
-            s.on("error", () => { if (retries-- > 0) setTimeout(attempt, 250); else reject(new Error("mpv IPC connect failed")); });
-        };
-        attempt();
-    });
-}
-async function tryConnectMpvSock(retries = 60) {
-  if (fscb.existsSync(SOCKET)) { try { fscb.unlinkSync(SOCKET); } catch {} }
-    return connectMpvSock(retries)
+async function connectMpvSock(retries = 60): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let remaining = retries;
+    const attempt = () => {
+      const s = net.createConnection(SOCKET, () => {
+        mpvSock = s;
+        wireMpvIPC(s);
+        resolve();
+      });
+      s.on("error", () => {
+        if (remaining-- > 0) setTimeout(attempt, 250);
+        else reject(new Error("mpv IPC connect failed"));
+      });
+    };
+    attempt();
+  });
 }
 
-function wireMpvIPC(s) {
+function wireMpvIPC(s: net.Socket): void {
   let buf = "";
-  let loadTimer = null;
+  let loadTimer: NodeJS.Timeout | null = null;
 
   const armWatchdog = () => {
-    clearTimeout(loadTimer);
+    if (loadTimer) {
+      clearTimeout(loadTimer);
+    }
     // if nothing fully loads in 15s, skip
     loadTimer = setTimeout(() => mpvSend(["playlist-next", "force"]), 15000);
   };
 
-  s.on("data", (d) => {
+  s.on("data", (d: Buffer) => {
     buf += d.toString("utf8");
     let idx;
     while ((idx = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
       if (!line.trim()) continue;
-      let j; try { j = JSON.parse(line); } catch { continue; }
+      let j: { event?: string; name?: string; data?: unknown; reason?: string } | null = null;
+      try {
+        j = JSON.parse(line) as { event?: string; name?: string; data?: unknown; reason?: string };
+      } catch {
+        continue;
+      }
 
       // Core events for robustness
       if (j.event === "start-file") {
         armWatchdog();
       }
       if (j.event === "file-loaded") {
-        clearTimeout(loadTimer);
+        if (loadTimer) {
+          clearTimeout(loadTimer);
+        }
       }
       if (j.event === "end-file") {
         // reason can be "eof", "error", "redirect", "stop", "quit"
@@ -141,12 +168,16 @@ function wireMpvIPC(s) {
       // Your existing metadata updates
       if (j.event === "property-change") {
         if (j.name === "media-title") {
-          current.title = j.data || "";
+          current.title = typeof j.data === "string" ? j.data : "";
           broadcast({ type: "track", title: prettyTitle() });
         }
         if (j.name === "metadata") {
-          current.meta = j.data || {};
-          current.artist = current.meta.artist || current.meta.ARTIST || "";
+          const meta =
+            typeof j.data === "object" && j.data
+              ? (j.data as Record<string, string>)
+              : {};
+          current.meta = meta;
+          current.artist = meta.artist || meta.ARTIST || "";
           broadcast({ type: "track", title: prettyTitle() });
         }
       }
@@ -156,7 +187,9 @@ function wireMpvIPC(s) {
   s.on("close", () => {
     mpvSock = null;
     console.warn("mpv IPC closed; attempting reconnect…");
-    connectMpvSock().catch(() => {/* will retry on next loop */});
+    connectMpvSock().catch(() => {
+      /* will retry on next loop */
+    });
   });
   mpvSend(["observe_property", 1, "media-title"]);
   mpvSend(["observe_property", 2, "metadata"]);
@@ -196,18 +229,22 @@ function startWallpaper() {
 
         "--log-file=/tmp/mpv-wall.log",
     ];
-    if (PLAYLIST) mpvArgs.push(`--playlist=${PLAYLIST}`); else mpvArgs.push(URL_IN);
+    if (PLAYLIST) {
+      mpvArgs.push(`--playlist=${PLAYLIST}`);
+    } else if (URL_IN) {
+      mpvArgs.push(URL_IN);
+    }
     const xArgs = ["-b","-s","-fs","-st","-sp","-nf","-ov","-fdt","--", MPV, ...mpvArgs];
     xwrapProc = spawn(XWINWRAP, xArgs, { stdio: "ignore" });
     xwrapProc.on("exit", (code, sig) => { console.log("xwinwrap exited", code, sig); process.exit(0); });
 
-    setTimeout(() => { connectMpvSock().catch(e => console.error(e)); }, 400);
+    setTimeout(() => { connectMpvSock().catch((error) => console.error(error)); }, 400);
     // wait for socket to appear, then connect (robust vs. timing)
     const start = Date.now();
     const poll = setInterval(() => {
         if (fscb.existsSync(SOCKET)) {
             clearInterval(poll);
-            connectMpvSock().catch(e => console.error(e));
+            connectMpvSock().catch((error) => console.error(error));
         } else if (Date.now() - start > 15000) {
             clearInterval(poll);
             console.error("mpv IPC socket never appeared:", SOCKET);
@@ -216,17 +253,24 @@ function startWallpaper() {
 }
 
 // HTTP server (static + tiny API)
-const server = http.createServer(async (req, res) => {
-  const u = url.parse(req.url, true);
+const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
+  const u = url.parse(req.url ?? '/', true);
   if (u.pathname === "/health") { res.setHeader("Content-Type","application/json"); res.end(JSON.stringify({ ok: true, title: prettyTitle() })); return; }
   if (u.pathname === "/api/title") { res.setHeader("Content-Type","application/json"); res.end(JSON.stringify({ title: prettyTitle(), meta: current.meta })); return; }
   if (u.pathname === "/api/next") { mpvSend(["playlist-next","weak"]); res.end("ok"); return; }
   if (u.pathname === "/api/prev") { mpvSend(["playlist-prev","weak"]); res.end("ok"); return; }
   if (u.pathname === "/api/pause") { mpvSend(["cycle","pause"]); res.end("ok"); return; }
-  if (u.pathname === "/api/vol") { const d = Number(u.query.delta || 5); mpvSend(["add","volume", d]); res.end("ok"); return; }
+  if (u.pathname === "/api/vol") {
+    const deltaRaw = Array.isArray(u.query.delta) ? u.query.delta[0] : u.query.delta;
+    const d = Number(deltaRaw ?? 5);
+    mpvSend(["add", "volume", d]);
+    res.end("ok");
+    return;
+  }
 
   // static files
-  let safe = path.normalize(decodeURIComponent(u.pathname)).replace(/^\/+/, "");
+  const pathname = u.pathname ?? "/";
+  let safe = path.normalize(decodeURIComponent(pathname)).replace(/^\/+/, "");
   if (!safe) safe = "index.html";
   const filePath = path.join(PUBLIC_DIR, safe);
   await sendFile(res, filePath);
@@ -234,7 +278,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 const wss = new WebSocketServer({ server, path: "/ws" });
-wss.on("connection", (ws) => {
+wss.on("connection", (ws: WebSocket) => {
   wsClients.add(ws);
   ws.on("close", () => wsClients.delete(ws));
   ws.send(JSON.stringify({ type: "track", title: prettyTitle() }));
